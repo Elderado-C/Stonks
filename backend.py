@@ -1,67 +1,99 @@
 # backend.py
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import yfinance as yf
-from datetime import datetime, time
-import pytz
+from datetime import datetime, timezone
+import random
 
 app = FastAPI()
 
-# Allow frontend to communicate with backend
+# Allow the React frontend to communicate with this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # In production, change this to your frontend URL
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-def get_market_status():
-    est = pytz.timezone('US/Eastern')
-    now = datetime.now(est)
-    current_time = now.time()
+@app.get("/api/market/snapshot")
+def get_market_snapshot():
+    """
+    Returns the exact JSON payload expected by the React UI's fetchLiveMarketData()
+    """
+    # The default universe of stocks in your React UI
+    stock_symbols = [
+        "VOO", "ASTS", "SPY", "QQQ", "NVDA", "TSLA", 
+        "IREN", "VRT", "APLD", "RKLB", "HUT"
+    ]
     
-    # 3-Hour window logic
-    open_time = time(9, 30)
-    window_end = time(12, 30)
+    # NBIS is not a standard Yahoo Finance ticker, so we handle it separately
+    stocks_data = []
     
-    if time(4, 0) <= current_time < time(9, 30):
-        session = "Pre-Market"
-    elif time(9, 30) <= current_time < time(16, 0):
-        session = "Regular Trading"
-    elif time(16, 0) <= current_time < time(20, 0):
-        session = "After-Hours"
-    else:
-        session = "Closed"
-
-    time_remaining = "0 hrs"
-    if session == "Regular Trading" and current_time < window_end:
-        tdelta = datetime.combine(now.date(), window_end) - datetime.combine(now.date(), current_time)
-        time_remaining = f"{tdelta.seconds // 3600}h {(tdelta.seconds // 60) % 60}m"
-
-    return {"session": session, "time_in_3h_window": time_remaining}
-
-@app.get("/api/dashboard")
-def get_dashboard_data():
-    market_status = get_market_status()
-    # Plug in real API keys (Polygon, Alpaca) here for production
+    # Fetch live data in bulk using yfinance
     try:
-        spy = yf.Ticker("SPY").history(period="1d")
-        vix = yf.Ticker("^VIX").history(period="1d")
+        tickers = yf.Tickers(" ".join(stock_symbols))
         
-        return {
-            "market_session": market_status["session"],
-            "window_remaining": market_status["time_in_3h_window"],
-            "spy_price": round(spy['Close'].iloc[-1], 2) if not spy.empty else "N/A",
-            "vix_price": round(vix['Close'].iloc[-1], 2) if not vix.empty else "N/A",
-            "regime": "Mixed/Choppy", # Placeholder for complex logic
-            "data_status": "Live"
-        }
+        for sym in stock_symbols:
+            try:
+                # fast_info is the quickest way to get the current price in yfinance
+                current_price = tickers.tickers[sym].fast_info['lastPrice']
+                stocks_data.append({
+                    "symbol": sym,
+                    "current": round(current_price, 2),
+                    "dataStatus": "live",
+                    "source": "yfinance API"
+                })
+            except Exception:
+                # Fallback if a specific ticker fails to load
+                stocks_data.append({
+                    "symbol": sym,
+                    "current": 0.0,
+                    "dataStatus": "unavailable",
+                    "source": "yfinance error"
+                })
+                
     except Exception as e:
-        return {
-            "data_status": "Stale/Delayed",
-            "message": "Live confirmation unavailable. Please upload Webull screenshots (Daily, 1H, 5m, RSI, MACD, VWAP, Options Chain)."
+        return {"status": "unavailable", "source": f"Backend Error: {str(e)}"}
+
+    # Add NBIS mock data since it's a core holding in the UI but lacks a public yf ticker
+    stocks_data.append({
+        "symbol": "NBIS",
+        "current": round(76.20 + random.uniform(-1.5, 1.5), 2),
+        "dataStatus": "simulated",
+        "source": "Mock Backend Data"
+    })
+
+    # Options data is mocked here. Free live options APIs are virtually non-existent.
+    # Replace this block with a Polygon.io or Tradier API call in production.
+    options_data = [
+        {
+            "symbol": "DRAM",
+            "strike": 70,
+            "expiry": "2026-06-26",
+            "currentPremium": round(2.65 + random.uniform(-0.2, 0.4), 2),
+            "dataStatus": "simulated",
+            "source": "Mock Options Feed"
+        },
+        {
+            "symbol": "IREN",
+            "strike": 90,
+            "expiry": "2026-07-17",
+            "currentPremium": round(2.10 + random.uniform(-0.15, 0.3), 2),
+            "dataStatus": "simulated",
+            "source": "Mock Options Feed"
         }
+    ]
+
+    return {
+        "status": "live",
+        # ISO format timestamp required by the React frontend (secondsSince function)
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "source": "Python FastAPI + yfinance",
+        "stocks": stocks_data,
+        "options": options_data
+    }
 
 if __name__ == "__main__":
     import uvicorn
+    # Runs the server on http://localhost:8000
     uvicorn.run(app, host="0.0.0.0", port=8000)
